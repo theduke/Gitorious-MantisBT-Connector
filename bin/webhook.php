@@ -19,16 +19,17 @@ $mantisBeanstalk = new MantisBeanstalk();
  */
 $connector = new MantisConnector(
   'http://your-mantis-url.com/api/soap/mantisconnect.php?wsdl', 
-  'mantis-username', 
+  'your-mantis-user', 
   'mantis-password', 
   // custom soap options here 
-  array());
-
+  array()
+);
   
 // set the mantis client
 $mantisBeanstalk->setMantisClient($connector);
 
 // set your custom log path
-$mantisBeanstalk->setLogPath('/var/log/mantis-beanstalk');  
+$logPath = realpath(__DIR__ . '/../log');
+$mantisBeanstalk->setLogPath($logPath);  
 
 $mantisBeanstalk->run();

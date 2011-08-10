@@ -4,10 +4,14 @@ require_once 'InstructionParser.php';
 
 class MantisBeanstalk
 {
-	/** @var MantisConnector */
+	/** 
+	 * @var MantisConnector 
+	 */
 	protected $mantisClient;
 	
-	/** @var InstructionParser */
+	/** 
+	 * @var InstructionParser 
+	 */
 	protected $parser;
 	
 	/**
@@ -17,22 +21,28 @@ class MantisBeanstalk
 	 */
 	protected $projectMapping;
 	
+	/**
+	 * The data contained in the payload
+	 * 
+	 * See https://gitorious.org/gitorious/pages/WebHooks 
+	 * for format
+	 * 
+	 * @var stdClass
+	 */
 	protected $data;
 	
+	protected $logData = array();
+
 	/**
-	 * @var string see TYPE_ constants
+	 * Path to log directory
+	 * 
+	 * @var string
 	 */
-	protected $dataType;
-	
-	const TYPE_GIT = 'git';
-	const TYPE_SVN = 'svn';
-	
-	protected $logContent;
-	
 	protected $logPath;
 	
 	/**
 	 * the mantis project id
+	 * 
 	 * @var string
 	 */
 	protected $projectId;
@@ -44,68 +54,49 @@ class MantisBeanstalk
 	
 	public function run()
 	{
-		$logContent = '';
-		
-		$logContent .= print_r($_REQUEST, true) . PHP_EOL . PHP_EOL;
+		$this->logData[] = print_r($_REQUEST, true);
 		
 		$e = null;
 		try {
 			$this->execute();
 		} catch (Exception $e) {
-			$logContent .= $e->getMessage() . PHP_EOL . PHP_EOL . $e->getTraceAsString();
+			$logData[] = $e->getMessage();
+			$logData[] = $e->getTraceAsString();
 		}
 		
-		if ($this->logPath)	$this->doLog($logContent);
-		
-		// rethrow exception for testing
-		if ($e)
-		{
-			var_dump($logContent);
-			throw $e;
-		}
+		if ($this->logPath)	$this->writeLog();
 	}
 	
-	protected function doLog($content)
+	protected function writeLog()
 	{
+	  $content = implode("\n\n", $this->logData);
+	  
 		if (!is_dir($this->logPath) || !is_writable($this->logPath))
 		{
 			throw new Exception('Specified log path is not writable or does not exist.');
 		}
-		
-		if (isset($this->data['revision']))
-		{
-			$filename = 'revision' . $this->data['revision'] . '.log';
-		} else {
-			$i = count(scandir($this->logPath)) -1;
-			$filename = "log_{$i}.log";
-		}
+
+		$i = count(scandir($this->logPath)) -1;
+		$filename = "log_{$i}.log";
 		
 		$path = $this->getLogPath() .  $filename;
 		
-    	$flag = file_put_contents($path, $content);
-		
-	    if ($flag === false)
-	    {
-	    	throw new Exception('Could not write log file.');
-	    }
+   	$flag = file_put_contents($path, $content);
+	
+    if ($flag === false)
+    {
+    	throw new Exception('Could not write log file.');
+    }
 	}
 	
 	public function execute()
 	{
-		if (isset($_REQUEST['commit']))
+		if (!isset($_REQUEST['payload']))
 		{
-			$this->dataType = self::TYPE_SVN;
-			$data = $_REQUEST['commit'];
-		} else if (isset($_REQUEST['payload']))
-		{
-			$this->dataType = self::TYPE_GIT;
-			$data = $_REQUEST['payload'];
-		} else {
-			throw new Exception('Could not find Beanstalk data in POST.');
+			throw new Exception('Could not find Gitorious webhook data in POST.');
 		}
 		
-		// remove stupid escapes from data
-		$data = str_replace('\"', '"', $data);
+		$data = $_REQUEST['payload'];
 		
 		$data = json_decode($data);
 		$data = get_object_vars($data);
@@ -117,24 +108,22 @@ class MantisBeanstalk
 		
 		$this->data = $data;
 		
-		if ($this->dataType === self::TYPE_SVN)
-		{
-			// for svn , wrap data in another array for foreach
-			$data = array('commits' => array($data));
-		}
+		$this->logData[] = 'Trying to parse ' . count($data['commits']) . ' commits.';
 		
 		foreach ($data['commits'] as $commit)
 		{
 			if (is_object($commit)) $commit = get_object_vars($commit);
 			
-			$this->processHook($commit);
+			$this->processCommit($commit);
 		}
+		
+		$this->logData[] = 'Processed all commits.';
 	}
 	
-	public function processHook(array $data)
+	public function processCommit(array $data)
 	{
 		$instructions = $this->parser->parse($data['message'], $data);		
-		
+    
 		foreach ($instructions as $instruction)
 		{
 			$this->processInstruction($instruction, $data);
@@ -143,33 +132,33 @@ class MantisBeanstalk
 	
 	public function processInstruction(Instruction $instruction, $data)
 	{
+	  $this->logData[] = 'Processing instruction for issue #' . $instruction->issueId;
+	  
 		/** @var IssueData */
 		$issue = $this->mantisClient->mc_issue_get($instruction->issueId);
 		
-		if (!$issue) return false;
-		
-		$projectId = $issue->project->id;
-		
-		if (!$this->projectId && $projectId)
+		if (!$issue)
 		{
-			$this->projectId = $projectId;
-		} else {
-			throw new Exception('Could not determine project ID!');
+			throw new Exception('Issue with id "' . $instruction->issueId . '" not found!');
 		}
 		
-		$user = $this->determineUser($data); 
+		$projectId = $issue->project->id;
+
+		$user = $this->determineUser($data, $projectId); 
 		
 		if (!$user) throw new Exception('User could not be found.');
 		
+		$this->logData[] = 'Found user ...';
+
 		if ($assignTo = $instruction->assignTo)
 		{
-			$handler = $this->mantisClient->getUserBy('name', $this->projectId, $assignTo);
-			
+			$handler = $this->mantisClient->getUserBy('name', $projectId, $assignTo);
 			if ($handler)
 			{
 				$issue->handler = $handler;
 			}
 		}
+		
 		if ($status = $instruction->getAsObjectRef('status'))
 		{
 			$issue->status = $status;
@@ -187,57 +176,64 @@ class MantisBeanstalk
 			$issue->resolution = $resolution;
 		}
 		
-		if ($instruction->note)
+		// add new note to issue
+		$noteText = $instruction->note ? $instruction->note : '';
+		$noteText .= $this->getCommitInfoMessage($data);
+			
+		$note = new IssueNoteData();
+		$note->text = $noteText;
+		$note->reporter = $user;
+			
+		$this->mantisClient->mc_issue_note_add($instruction->issueId, $note);
+		
+		$this->logData[] = 'Trying to update issue...';
+
+		$result = $this->mantisClient->mc_issue_update($instruction->issueId, $issue);
+		
+		$this->logData[] = print_r($issue, true);
+		
+		if (!$result)
 		{
-			$noteText = $instruction->note;
-			
-			$revision = $this->dataType === self::TYPE_GIT ? $data['id'] : $data['revision'];
-			
-			if ($revision)
-			{
-				$noteText .= PHP_EOL . PHP_EOL . str_repeat('-', 20) . 
-				  PHP_EOL .  'revision: ' . $revision;
-			}
-			
-			$note = new IssueNoteData();
-			$note->text = $noteText;
-			$note->reporter = $user;
-			
-			$this->mantisClient->mc_issue_note_add($instruction->issueId, $note);
+		  throw new Exception('Could not update Issue #' . $instruction->issueId);
 		}
 		
-		$this->mantisClient->mc_issue_update($instruction->issueId, $issue);
+		$this->logData[] = 'Issue updated successfully';
 	}
 	
-	protected function determineUser($commit)
+	protected function getCommitInfoMessage($data)
 	{
-		if ($this->dataType === self::TYPE_GIT)
-		{
-			$email = $commit['author']->email;
-			$name = $commit['author']->name;
-		} else if ($this->dataType === self::TYPE_SVN) {
-			$email = $commit['author_email'];
-			$name = $commit['author'];
-		}
+	  $message = PHP_EOL . PHP_EOL . str_repeat('-', 100) . PHP_EOL;
+	  
+	  $message .= 'Repository: ' . $this->data['repository']->name . ' <' . $this->data['repository']->url . '>' . PHP_EOL;
+	  $author = $data['author'];
+		$message .= sprintf(
+		  'Author: %s <%s>', 
+		  isset($author->name) ? $author->name : '', 
+		  isset($author->email) ? $author->email : ''
+		) . PHP_EOL;
 		
-		$user = $this->mantisClient->getUserByEmail($this->projectId, $email);
-		if (!$user) $user = $this->mantisClient->getUserBy('name', $this->projectId, $name);
+		
+		$message .= 'Revision: ' . $data['id'] .  ' <' . $data['url'] .  '>' . PHP_EOL;
+		$message .= 'Committed At: ' . $data['committed_at'] . PHP_EOL;
+		$message .= 'Pushed At: ' . $this->data['pushed_at'] . PHP_EOL;
+		
+		return $message;
+	}
+	
+	protected function determineUser($commit, $projectId)
+	{
+		$email = $commit['author']->email;
+		$name = $commit['author']->name;
+		
+		$user = $this->mantisClient->getUserByEmail($projectId, $email);
+		if (!$user) $user = $this->mantisClient->getUserBy('name', $projectId, $name);
 		
 		return $user;
 	}
 	
 	protected function verifyData(array $data)
 	{
-		$flag = true;
-		
-		if ($this->dataType === self::TYPE_GIT) 
-		{
-			if (!isset($data['commits']) || empty($data['commits'])) $flag = false;
-		} else if ($this->dataType === self::TYPE_SVN) {
-			if (!isset($data['message'])) $flag = false;
-		}
-		
-		return $flag;
+    return (isset($data['commits']) && is_array($data['commits']));
 	}
 	
 	public function setMantisClient($mantisClient)

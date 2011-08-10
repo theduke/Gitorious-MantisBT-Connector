@@ -29,26 +29,34 @@ class InstructionParser
 		$parseResult = $this->parseInstruction($message);
 		if (!$parseResult) return false;
 		
-		
-		$instruction->issueId = (int)$parseResult[0];
+		$instruction->issueId = (int) $parseResult[0];
 		
 		$parsedCommands = $parseResult[1];
 		
-		if (isset($parsedCommands['status'])) $instruction->status = $parsedCommands['status'];
-		if (isset($parsedCommands['priority'])) $instruction->status = $parsedCommands['priority'];
-		if (isset($parsedCommands['resolution'])) $instruction->resolution = $parsedCommands['resolution'];
-		if (isset($parsedCommands['assign'])) $instruction->assignTo = $parsedCommands['assign'];
-		
-		if (isset($parsedCommands['tags']))
+		foreach ($parsedCommands as $key => $value)
 		{
-			$tags = explode(',', $parsedCommands['tags']);
-			if ($tags) $instruction->setTags($tags);
+		  switch ($key)
+		  {
+		    case 'status':
+		    case 'priority':
+		    case 'resolution':
+		    case 'severity';
+		      $instruction->$key = $value;
+		      break;
+		    case 'assign':
+		      $instruction->assignTo = $value;
+		      break;
+		    case 'tags':
+		      $tags = explode(',', $value);
+			    if ($tags) $instruction->setTags($tags);
+		      break;
+		    case 'message':
+		      $instruction->note = $value;
+		      break;
+		  }
 		}
 		
-		if (isset($parsedCommands['message']))
-		{
-			$instruction->note = $parsedCommands['message'];
-		} else 
+		if (!$instruction->note)
 		{
 			$instruction->note = str_replace($parseResult[2], '', $data['message']);	
 		}
